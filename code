@@ -1,0 +1,453 @@
+// ═══════════════════════════════════════════════════════════════
+// AMIIS — Nouveau Contrat V2026  |  Code.gs
+// ═══════════════════════════════════════════════════════════════
+
+// ── À renseigner (optionnel — tout se crée automatiquement) ───
+var SPREADSHEET_ID = '1nxTYg3f-ywC4Oz7BE29BE-JXUGRYJ7d2oMw3L_tpbvU';  // Laisser vide = création auto, sinon collez l'ID du Sheet
+var FOLDER_ID      = '12kabEuq7rf4Ha3UoMlSVxDMQ-PE8ijdR';  // Laisser vide = racine Drive, sinon ID du dossier PDF
+var EMAIL_CABINET  = 'asso.amis.landes@gmail.com';  // Email de copie sur chaque contrat soumis
+
+// ─────────────────────────────────────────────────────────────
+// POINT D'ENTRÉE
+// ─────────────────────────────────────────────────────────────
+function doGet(e) {
+  return HtmlService
+    .createHtmlOutputFromFile('index')
+    .setTitle('Nouveau Contrat AMIIS V2026')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// EMAIL CONNECTÉ
+// ─────────────────────────────────────────────────────────────
+function getUserEmail() {
+  try { return Session.getActiveUser().getEmail(); } catch(e) { return ''; }
+}
+
+// ─────────────────────────────────────────────────────────────
+// CONFIG
+// ─────────────────────────────────────────────────────────────
+function saveConfig(jsonString) {
+  try {
+    PropertiesService.getScriptProperties().setProperty('AMIIS_CFG', jsonString);
+    return { status: 'ok' };
+  } catch(e) { return { status: 'error', message: e.message }; }
+}
+
+function loadConfig() {
+  try {
+    return PropertiesService.getScriptProperties().getProperty('AMIIS_CFG') || null;
+  } catch(e) { return null; }
+}
+
+// ─────────────────────────────────────────────────────────────
+// RECEPTION CONTRAT  <- fonction principale
+// ─────────────────────────────────────────────────────────────
+function saveNouveauContrat(metaJson, lignesJson, imagesJson) {
+
+  // 1. Parser le JSON
+  var meta;
+  try {
+    meta = JSON.parse(metaJson || '{}');
+  } catch(e) {
+    Logger.log('ERREUR parse JSON : ' + e.message);
+    return { status: 'error', message: 'JSON invalide : ' + e.message };
+  }
+
+  Logger.log('>>> saveNouveauContrat : ' + meta.reference + ' / ' + meta.structure);
+
+  // 2. SHEET EN PRIORITE ABSOLUE
+  var pdfUrl = '';
+  try {
+    var ss    = obtenirSheet();
+    var sheet = ss.getSheetByName('Contrats');
+    if (!sheet) sheet = ss.insertSheet('Contrats');
+    creerEntetes(sheet);
+
+    var ds = meta.dateSoumission ||
+      Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm');
+
+    sheet.appendRow([
+      meta.reference      || '',
+      ds,
+      meta.email          || '',
+      meta.structure      || '',
+      meta.salarie        || '',
+      meta.projet         || '',
+      meta.dateDebut      || '',
+      meta.dateFin        || '',
+      meta.fonction       || '',
+      meta.artTech        || '',
+      meta.montantDetail  || '',
+      meta.serviceDetail  || '',
+      meta.joursTravailes || '',
+      meta.defraiement    || '',
+      meta.commentaire    || '',
+      '...'
+    ]);
+
+    var ligneNum = sheet.getLastRow();
+    Logger.log('Ligne ' + ligneNum + ' ecrite dans le Sheet');
+
+    // 3. PDF (optionnel)
+    try {
+      pdfUrl = genererPDF(meta);
+      Logger.log('PDF genere : ' + pdfUrl);
+      sheet.getRange(ligneNum, 16).setValue(pdfUrl);
+    } catch(pdfErr) {
+      Logger.log('PDF non genere (non bloquant) : ' + pdfErr.message);
+      sheet.getRange(ligneNum, 16).setValue('—');
+    }
+
+    // 4. Email (optionnel)
+    try {
+      envoyerEmail(meta, pdfUrl);
+      Logger.log('Email envoye');
+    } catch(mailErr) {
+      Logger.log('Email non envoye (non bloquant) : ' + mailErr.message);
+    }
+
+    Logger.log('>>> saveNouveauContrat TERMINE OK');
+    return { status: 'ok', url: pdfUrl };
+
+  } catch(e) {
+    Logger.log('ERREUR FATALE : ' + e.message + '\n' + e.stack);
+    return { status: 'error', message: e.message };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// SHEET
+// ─────────────────────────────────────────────────────────────
+function obtenirSheet() {
+  if (SPREADSHEET_ID) {
+    Logger.log('Sheet depuis SPREADSHEET_ID');
+    return SpreadsheetApp.openById(SPREADSHEET_ID);
+  }
+  var props   = PropertiesService.getScriptProperties();
+  var savedId = props.getProperty('AUTO_SS_ID');
+  if (savedId) {
+    try {
+      var ss = SpreadsheetApp.openById(savedId);
+      Logger.log('Sheet depuis Properties : ' + ss.getUrl());
+      return ss;
+    } catch(e) {
+      Logger.log('Sheet Properties inaccessible, recréation');
+    }
+  }
+  var nouveau = SpreadsheetApp.create('AMIIS - Contrats V2026');
+  props.setProperty('AUTO_SS_ID', nouveau.getId());
+  Logger.log('Nouveau Sheet : ' + nouveau.getUrl());
+  Logger.log('Copiez cet ID dans SPREADSHEET_ID : ' + nouveau.getId());
+  return nouveau;
+}
+
+function creerEntetes(sheet) {
+  if (sheet.getLastRow() > 0) return;
+  var cols = [
+    'Reference', 'Date soumission', 'Email', 'Structure',
+    'Salarie', 'Projet', 'Date debut', 'Date fin',
+    'Fonction', 'Art/Tech', 'Detail montants',
+    'Services', 'Jours travailles', 'Defraiement', 'Commentaire',
+    'Lien PDF'
+  ];
+  sheet.appendRow(cols);
+  sheet.getRange(1, 1, 1, cols.length)
+    .setFontWeight('bold')
+    .setBackground('#F7941D')
+    .setFontColor('white');
+  sheet.setFrozenRows(1);
+  sheet.setColumnWidth(1, 140);
+  sheet.setColumnWidth(2, 130);
+  sheet.setColumnWidth(4, 150);
+  sheet.setColumnWidth(5, 150);
+  sheet.setColumnWidth(6, 150);
+}
+
+// ─────────────────────────────────────────────────────────────
+// PDF
+// ─────────────────────────────────────────────────────────────
+function genererPDF(meta) {
+  var html = construireHtmlPDF(meta);
+  var tmp  = DriveApp.createFile('_tmp_' + meta.reference + '.html', html, MimeType.HTML);
+  var blob = tmp.getAs(MimeType.PDF);
+  blob.setName('Contrat_' + (meta.reference || 'SANS_REF') + '_' +
+               (meta.salarie || '').replace(/\s+/g, '_') + '.pdf');
+  tmp.setTrashed(true);
+
+  var parent     = FOLDER_ID ? DriveApp.getFolderById(FOLDER_ID) : DriveApp.getRootFolder();
+  var sousFolder = obtenirOuCreerDossier(parent, meta.structure || 'Divers');
+  var pdf        = sousFolder.createFile(blob);
+  pdf.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return pdf.getUrl();
+}
+
+function obtenirOuCreerDossier(parent, nom) {
+  var iter = parent.getFoldersByName(nom);
+  return iter.hasNext() ? iter.next() : parent.createFolder(nom);
+}
+
+function construireHtmlPDF(meta) {
+  var lignes = [
+    ['Structure',        meta.structure],
+    ['Email',            meta.email],
+    ['Salarie',          meta.salarie],
+    ['Projet',           meta.projet],
+    ['Date debut',       meta.dateDebut],
+    ['Date fin',         meta.dateFin],
+    ['Fonction',         meta.fonction],
+    ['Categorie',        meta.artTech],
+    ['Montants',         meta.montantDetail],
+    ['Services',         meta.serviceDetail],
+    ['Jours travailles', meta.joursTravailes],
+    ['Defraiements',     meta.defraiement],
+    ['Commentaire',      meta.commentaire]
+  ];
+  var rows = lignes.map(function(r, i) {
+    return '<tr style="background:' + (i%2===0?'#f9f7f4':'#fff') + '">'
+      + '<td style="padding:7px 10px;color:#58595B;font-weight:600;width:35%">' + r[0] + '</td>'
+      + '<td style="padding:7px 10px">' + (r[1] || '-') + '</td></tr>';
+  }).join('');
+
+  return '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>'
+    + 'body{font-family:Arial,sans-serif;font-size:10.5pt;color:#333;margin:1.8cm}'
+    + 'h1{color:#F7941D;font-size:15pt;margin:0 0 4px}'
+    + '.ref{color:#8a8a8c;font-size:8.5pt;margin-bottom:18px}'
+    + 'table{width:100%;border-collapse:collapse;border:1px solid #e0ddd8}'
+    + 'td{border-bottom:1px solid #e8e4df}'
+    + '.foot{color:#bbb;font-size:7.5pt;margin-top:28px;padding-top:8px;border-top:1px solid #eee}'
+    + '</style></head><body>'
+    + '<h1>Nouveau Contrat AMIIS V2026</h1>'
+    + '<p class="ref">Ref. <strong>' + (meta.reference || '') + '</strong>'
+    + ' | ' + (meta.dateSoumission || '') + '</p>'
+    + '<table>' + rows + '</table>'
+    + '<p class="foot">Document genere automatiquement - AMIIS</p>'
+    + '</body></html>';
+}
+
+// ─────────────────────────────────────────────────────────────
+// EMAIL
+// ─────────────────────────────────────────────────────────────
+function envoyerEmail(meta, pdfUrl) {
+  var cabinetEmail = EMAIL_CABINET ||
+    PropertiesService.getScriptProperties().getProperty('EMAIL_CABINET') || '';
+  var to = meta.email || '';
+  var cc = (cabinetEmail && cabinetEmail !== to) ? cabinetEmail : '';
+  if (!to && !cc) { Logger.log('Pas d email defini'); return; }
+
+  var sujet = '[AMIIS] Contrat ' + (meta.reference || '') +
+              ' - ' + (meta.salarie || '') + ' / ' + (meta.structure || '');
+
+  var rows = [
+    ['Reference',  meta.reference],
+    ['Structure',  meta.structure],
+    ['Salarie',    meta.salarie],
+    ['Projet',     meta.projet],
+    ['Fonction',   meta.fonction],
+    ['Categorie',  meta.artTech],
+    ['Periode',    (meta.dateDebut || '') + ' -> ' + (meta.dateFin || '')],
+    ['Jours',      meta.joursTravailes],
+    ['Montants',   meta.montantDetail]
+  ].map(function(r, i) {
+    return '<tr style="background:' + (i%2===0?'#fff':'#f5f3ef') + '">'
+      + '<td style="padding:6px 8px;color:#8a8a8c;width:38%;font-weight:600">' + r[0] + '</td>'
+      + '<td style="padding:6px 8px">' + (r[1] || '-') + '</td></tr>';
+  }).join('');
+
+  var corps =
+    '<div style="font-family:Arial,sans-serif;max-width:580px">'
+    + '<div style="background:#F7941D;padding:14px 20px;border-radius:8px 8px 0 0">'
+    + '<h2 style="color:white;margin:0;font-size:14pt">Nouveau Contrat AMIIS</h2></div>'
+    + '<div style="background:#F9F7F4;padding:20px;border:1px solid #E8E4DF;border-radius:0 0 8px 8px">'
+    + '<table style="width:100%;border-collapse:collapse;font-size:9.5pt">' + rows + '</table>'
+    + (pdfUrl ? '<p style="margin-top:18px"><a href="' + pdfUrl
+      + '" style="background:#58595B;color:white;padding:9px 18px;border-radius:6px;text-decoration:none">Voir le PDF</a></p>' : '')
+    + '<p style="color:#aaa;font-size:7.5pt;margin-top:20px">AMIIS</p>'
+    + '</div></div>';
+
+  var opts = { to: to || cc, subject: sujet, htmlBody: corps };
+  if (to && cc) opts.cc = cc;
+  MailApp.sendEmail(opts);
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADMIN UTILITAIRES
+// ─────────────────────────────────────────────────────────────
+function setEmailCabinet(email) {
+  PropertiesService.getScriptProperties().setProperty('EMAIL_CABINET', email);
+  Logger.log('Email cabinet : ' + email);
+}
+
+function getSheetUrl() {
+  try { var ss = obtenirSheet(); Logger.log(ss.getUrl()); return ss.getUrl(); }
+  catch(e) { return 'Erreur : ' + e.message; }
+}
+
+function resetConfig() {
+  PropertiesService.getScriptProperties().deleteProperty('AMIIS_CFG');
+  Logger.log('Config reinitialise');
+}
+
+// ─────────────────────────────────────────────────────────────
+// DEMANDE D'AIDE ADMINISTRATIVE
+// ─────────────────────────────────────────────────────────────
+function envoyerDemandeAide(payloadJson) {
+  try {
+    var p = JSON.parse(payloadJson || '{}');
+    Logger.log('Demande aide de : ' + p.email);
+
+    var destinataire = 'asso.amis.landes@gmail.com';
+
+    var sujet = '[AMIIS] Demande de conseil administratif — ' + (p.nom || p.email);
+
+    var corps =
+      '<div style="font-family:Arial,sans-serif;max-width:580px">'
+      + '<div style="background:#F7941D;padding:16px 20px;border-radius:8px 8px 0 0">'
+      + '<h2 style="color:white;margin:0;font-size:14pt">📋 Demande de conseil administratif</h2>'
+      + '<p style="color:rgba(255,255,255,.85);margin:.3rem 0 0;font-size:10pt">Reçue le ' + (p.date || '') + '</p>'
+      + '</div>'
+      + '<div style="background:#F9F7F4;padding:20px;border:1px solid #E8E4DF;border-radius:0 0 8px 8px">'
+      + '<table style="width:100%;border-collapse:collapse;font-size:10pt;margin-bottom:16px">'
+      + '<tr style="background:#fff"><td style="padding:8px;color:#8a8a8c;width:35%;font-weight:600">Nom</td><td style="padding:8px">' + (p.nom || '—') + '</td></tr>'
+      + '<tr style="background:#f5f3ef"><td style="padding:8px;color:#8a8a8c;font-weight:600">Email</td><td style="padding:8px"><a href="mailto:' + (p.email||'') + '">' + (p.email || '—') + '</a></td></tr>'
+      + '<tr style="background:#fff"><td style="padding:8px;color:#8a8a8c;font-weight:600">Structure</td><td style="padding:8px">' + (p.structure || '—') + '</td></tr>'
+      + '</table>'
+      + '<div style="background:white;border-left:3px solid #F7941D;padding:12px 16px;border-radius:0 8px 8px 0;margin-bottom:16px">'
+      + '<p style="font-size:9pt;color:#8a8a8c;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin:0 0 6px">Question / Demande</p>'
+      + '<p style="font-size:10.5pt;color:#333;line-height:1.6;margin:0">' + (p.message || '').split('\n').join('<br>') + '</p>'
+      + '</div>'
+      + '<p style="color:#aaa;font-size:8pt;margin:0">→ Répondre directement à cet email pour contacter la personne.</p>'
+      + '</div></div>';
+
+    MailApp.sendEmail({
+      to: destinataire,
+      replyTo: p.email || '',
+      subject: sujet,
+      htmlBody: corps
+    });
+
+    // Email de confirmation à l\'expéditeur
+    if (p.email) {
+      MailApp.sendEmail({
+        to: p.email,
+        subject: '[AMIIS] Votre demande de conseil a bien été reçue',
+        htmlBody:
+          '<div style="font-family:Arial,sans-serif;max-width:580px">'
+          + '<div style="background:#F7941D;padding:16px 20px;border-radius:8px 8px 0 0">'
+          + '<h2 style="color:white;margin:0;font-size:14pt">✓ Demande bien reçue</h2>'
+          + '</div>'
+          + '<div style="background:#F9F7F4;padding:20px;border:1px solid #E8E4DF;border-radius:0 0 8px 8px">'
+          + '<p style="font-size:10.5pt;color:#333">Bonjour ' + (p.nom || '') + ',</p>'
+          + '<p style="font-size:10.5pt;color:#333;line-height:1.6">Votre demande de conseil administratif a bien été transmise à l\'équipe AMIIS. Nous la traitons en priorité et vous recontactons dans les meilleurs délais.</p>'
+          + '<div style="background:white;border-left:3px solid #F7941D;padding:10px 14px;border-radius:0 6px 6px 0;margin:16px 0">'
+          + '<p style="font-size:9.5pt;color:#555;margin:0"><em>' + (p.message || '').split('\n').join('<br>') + '</em></p>'
+          + '</div>'
+          + '<p style="font-size:10pt;color:#8a8a8c">L\'équipe AMIIS<br>asso.amis.landes@gmail.com</p>'
+          + '</div></div>'
+      });
+    }
+
+    Logger.log('Email aide envoyé OK');
+    return { status: 'ok' };
+
+  } catch(e) {
+    Logger.log('envoyerDemandeAide ERREUR : ' + e.message);
+    return { status: 'error', message: e.message };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// TESTS - lancer depuis l'editeur Apps Script
+// ─────────────────────────────────────────────────────────────
+
+// TEST 1 : ecriture directe dans le Sheet (sans PDF ni email)
+function testSheet() {
+  Logger.log('--- testSheet ---');
+  var ss    = obtenirSheet();
+  var sheet = ss.getSheetByName('Contrats');
+  if (!sheet) sheet = ss.insertSheet('Contrats');
+  creerEntetes(sheet);
+  sheet.appendRow([
+    'CTR-TEST-0001', new Date().toLocaleString(), 'test@amiis.fr',
+    'CEKO', 'Jean TEST', 'Projet TEST', '2026-01-01', '2026-01-05',
+    'comedien (ADR)', 'Artistique', '200€ x 3', '80€ x 2',
+    '1,2,3', '', 'Ligne de test', ''
+  ]);
+  Logger.log('OK - Sheet : ' + ss.getUrl());
+}
+
+// TEST 2 : soumission complete simulee
+function testContrat() {
+  Logger.log('--- testContrat ---');
+  var meta = {
+    reference: 'CTR-TEST-' + Date.now().toString().slice(-4),
+    dateSoumission: '01/01/2026 10:00',
+    email: 'test@amiis.fr',
+    structure: 'TXORIA BEZALA',
+    salarie: 'Jean DUPONT',
+    projet: 'Projet A',
+    dateDebut: '2026-01-15',
+    dateFin: '2026-01-20',
+    fonction: 'comedien (ADR)',
+    artTech: 'Artistique',
+    montantDetail: 'Cachet : 200€ x 3',
+    serviceDetail: '80€ x 2 services 4h',
+    joursTravailes: '15, 16, 17, 18, 19, 20',
+    defraiement: '20,70€ x 2',
+    commentaire: 'Test depuis editeur Apps Script'
+  };
+  var result = saveNouveauContrat(JSON.stringify(meta), '[]', '[]');
+  Logger.log('Resultat : ' + JSON.stringify(result));
+}
+
+// TEST 3 : config
+function testConfig() {
+  Logger.log('--- testConfig ---');
+  saveConfig(JSON.stringify({ company: 'AMIIS TEST', structures: ['A', 'B'] }));
+  Logger.log('Config chargee : ' + loadConfig());
+try {
+  pdfUrl = genererPDF(meta);
+  Logger.log('PDF OK : ' + pdfUrl);
+  sheet.getRange(ligneNum, 16).setValue(pdfUrl);
+} catch(pdfErr) {
+  Logger.log('PDF ERREUR DÉTAIL : ' + pdfErr.message + ' | stack: ' + pdfErr.stack);
+  sheet.getRange(ligneNum, 16).setValue('ERREUR: ' + pdfErr.message);
+}function testSheetAccess() {
+  var ss = SpreadsheetApp.openById('1nxTYg3f-ywC4Oz7BE29BE-JXUGRYJ7d2oMw3L_tpbvU');
+  Logger.log('Sheet trouvé : ' + ss.getName());
+  var sheet = ss.getSheetByName('Contrats');
+  Logger.log('Onglet Contrats : ' + (sheet ? 'OK — '+sheet.getLastRow()+' lignes' : 'INTROUVABLE'));
+  
+// Test écriture directe
+  sheet.appendRow(['TEST', new Date(), 'test@test.fr', 'CEKO', 'Jean TEST']);
+  Logger.log('Ligne écrite OK — maintenant ligne : ' + sheet.getLastRow());
+}}function testSheetAccess() {
+  var ss = SpreadsheetApp.openById('1nxTYg3f-ywC4Oz7BE29BE-JXUGRYJ7d2oMw3L_tpbvU');
+  Logger.log('Sheet trouvé : ' + ss.getName());
+  var sheet = ss.getSheetByName('Contrats');
+  Logger.log('Onglet Contrats : ' + (sheet ? 'OK — '+sheet.getLastRow()+' lignes' : 'INTROUVABLE'));
+  sheet.appendRow(['TEST', new Date(), 'test@test.fr', 'CEKO', 'Jean TEST']);
+  Logger.log('Ligne écrite OK — maintenant ligne : ' + sheet.getLastRow());
+}
+function testColonnesBalance() {
+  const ss = SpreadsheetApp.openById('1PTW0l5hjcIAuCv25FuUP9P1h2sU_6XB6UzNZq8f01h0');
+  const sheet = ss.getSheetByName('BALANCE');
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  Logger.log('COLONNES BALANCE: ' + JSON.stringify(headers));
+}
+
+function testColonnesCompta() {
+  const ss = SpreadsheetApp.openById('1PTW0l5hjcIAuCv25FuUP9P1h2sU_6XB6UzNZq8f01h0');
+  const sheet = ss.getSheetByName('COMPTA');
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  Logger.log('COLONNES COMPTA: ' + JSON.stringify(headers));
+}
+
+function testColonnesSalaries() {
+  const ss = SpreadsheetApp.openById('1PTW0l5hjcIAuCv25FuUP9P1h2sU_6XB6UzNZq8f01h0');
+  const sheet = ss.getSheetByName('SALARIES');
+  if (!sheet) { Logger.log('Onglet SALARIES introuvable'); return; }
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  Logger.log('COLONNES SALARIES: ' + JSON.stringify(headers));
+}
